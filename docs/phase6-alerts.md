@@ -1,14 +1,14 @@
 # Phase 6 — Detection Engineering & Alerts
 
-The three core detection queries from Phase 4 and 5 are converted into scheduled Splunk alerts that run automatically and feed the SOC dashboard. Each alert includes a tuning note — understanding what causes false positives is part of detection engineering, not just writing the query.
+The three core detections are converted into scheduled Splunk alerts. Each includes a tuning note — production-ready detection engineering means understanding what generates false positives, not just what generates true positives.
 
 ---
 
 ## Alert 1 — Brute Force Login Detected
 
-Fires when any single IP exceeds 5 POST requests to the login endpoint within a 1-minute window. Threshold chosen to avoid flagging a legitimate user mistyping their password (2-3 attempts) while reliably catching automated tooling (hundreds of attempts per minute).
+Fires when a single source IP exceeds 5 POST requests to the login endpoint within any 1-minute window. The threshold is anchored to the Phase 3 baseline: the entire pre-attack login history was 3 failed attempts — any rate above 5/minute is operationally anomalous.
 
-**Severity:** High · **Schedule:** Every 5 minutes (`*/5 * * * *`)
+**Severity:** High · **Schedule:** `*/5 * * * *` (every 5 minutes)
 
 ```spl
 index=webapp uri="*login*" method=POST
@@ -17,17 +17,17 @@ index=webapp uri="*login*" method=POST
 | where count > 5
 ```
 
-![Brute force alert saved and active in Splunk](../screenshots/phase6/phase6-01-bruteforce-alert-saved.png)
+![Brute force alert configured and saved in Splunk](../screenshots/phase6/phase6-01-bruteforce-alert-saved.png)
 
-**Tuning note:** During testing, a 1,440-events-per-minute anomaly appeared from background socket.io polling traffic misclassified as login requests. In production, known health-check IPs and service accounts should be excluded with an additional `NOT clientip IN ("x.x.x.x")` clause.
+**Tuning note:** Testing surfaced a 1,440-event-per-minute anomaly from background socket.io polling traffic misclassified as login requests. In production, health-check IPs and service accounts should be excluded with `NOT clientip IN (...)`.
 
 ---
 
 ## Alert 2 — Insider Threat Data Exfiltration Chain
 
-The highest-value alert in the lab. Only fires when all three stages of the insider kill chain (file access + compression + outbound connection) occur on the same host within 30 minutes. Near-zero false positive risk in practice — legitimate backup processes rarely combine file access to a sensitive directory, compression, and an outbound curl to a non-standard port within the same 30-minute window.
+Fires only when all three kill chain stages occur on the same host within 30 minutes. The `transaction` correlation and `eventcount >= 3` threshold mean this alert has near-zero false positive risk — legitimate activity rarely combines sensitive file access, compression, and an outbound curl to a non-standard port in a single 30-minute window.
 
-**Severity:** Critical · **Schedule:** Every 10 minutes (`*/10 * * * *`)
+**Severity:** Critical · **Schedule:** `*/10 * * * *` (every 10 minutes)
 
 ```spl
 index=windows (EventCode=4663 Object_Name="*CustomerExports*")
@@ -37,17 +37,17 @@ index=windows (EventCode=4663 Object_Name="*CustomerExports*")
 | where eventcount >= 3
 ```
 
-![Insider threat alert saved and active](../screenshots/phase6/phase6-02-insider-alert.png)
+![Insider threat alert configured and saved in Splunk](../screenshots/phase6/phase6-02-insider-alert.png)
 
-**Tuning note:** If the organization runs a legitimate scheduled backup of `CustomerExports`, exclude the backup service account from the 4663 filter, or require the combination of *all three stages* (which a backup process wouldn't trigger since it doesn't use curl to an external IP).
+**Tuning note:** If a scheduled backup process accesses `CustomerExports`, it may trigger Stage 1 (4663). Exclude the backup service account from the 4663 filter, or require that Stage 3 (5156 on port 4444) must also be present — a backup process wouldn't satisfy that condition.
 
 ---
 
 ## Alert 3 — Web Application Injection Attempt
 
-Flags any request URI containing common injection syntax patterns. The `.js$` exclusion prevents static JavaScript files from matching — without it, files like `utils.js` would trigger false positives on every page load.
+Flags URIs containing injection syntax patterns. The `NOT match(uri, "\.js$")` exclusion prevents static JavaScript files with common naming patterns from generating false positives on every page load.
 
-**Severity:** High · **Schedule:** Every 5 minutes (`*/5 * * * *`)
+**Severity:** High · **Schedule:** `*/5 * * * *` (every 5 minutes)
 
 ```spl
 index=webapp
@@ -55,9 +55,9 @@ index=webapp
 | table _time, clientip, uri, status, useragent
 ```
 
-![Injection attempt alert saved and active](../screenshots/phase6/phase6-03-injection-alert.png)
+![Injection alert configured and saved in Splunk](../screenshots/phase6/phase6-03-injection-alert.png)
 
-**Tuning note:** Non-browser user agents (`curl`, `sqlmap`, `python-requests`) alongside injection syntax should be treated as high-confidence positives. A real browser hitting a page that happens to contain `--` in a product name is a candidate for exclusion based on the full URI context.
+**Tuning note:** Non-browser user agents (`curl`, `sqlmap`) alongside injection syntax should be treated as high-confidence positives. A real browser sending a request that incidentally contains `--` in a product search string is a candidate for contextual exclusion based on the full URI pattern.
 
 ---
 

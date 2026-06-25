@@ -1,72 +1,93 @@
 # Phase 2+3 — SPL Fundamentals & Log Anatomy
 
-Before running any attacks, the Nginx access log format was studied and normal traffic baselines were established. Understanding what normal looks like is what makes anomalies detectable. Every detection query in Phase 4 and 5 builds directly on the SPL patterns introduced here.
+Before running attacks, normal traffic baselines were established using the Nginx access logs already flowing from WEB-PROD-01. This phase serves two purposes: building SPL proficiency on real data before the complexity of attack detection, and creating documented baselines that make anomalies unambiguous in Phase 4.
 
 ---
 
-## How SPL Works
+## SPL Structure
 
-SPL reads left to right. Everything before the first `|` filters which raw events to look at. Everything after `|` transforms or aggregates those events. This mental model holds for every query in this lab.
+Every SPL query follows the same pattern. The part before the first `|` selects and filters raw events. Each `|` pipes those events into the next command, which transforms or aggregates them. Reading SPL means reading left to right — each stage narrows or reshapes the data from the previous one.
 
 ```spl
-index=webapp uri="*login*" method=POST   ← filter: which events
-| stats count by clientip                ← transform: count them by IP
-| sort -count                            ← present: highest first
+index=webapp uri="*login*" method=POST   ← select events from webapp, filter to login POSTs
+| bucket _time span=1m                   ← group by 1-minute time windows
+| stats count by clientip, _time         ← count events per IP per window
+| where count > 5                        ← keep only windows with >5 attempts
 ```
 
 ---
 
-## HTTP Status Code Distribution — Baseline
+## HTTP Status Code Distribution — Pre-Attack Baseline
 
-`index=webapp | stats count by status` — groups all webapp events by HTTP status code. At baseline (before attacks), almost everything is `200 OK`. This baseline is what makes the 1,500-event spike of `401 Unauthorized` events during the credential stuffing attack immediately visible as an anomaly.
+At baseline, nearly all traffic returns `200 OK` — normal browsing, page loads, API calls. This flat distribution is the reference point that makes the 401 spike during credential stuffing immediately recognizable as an attack pattern rather than noise.
 
-![Status code baseline](../screenshots/phase2/phase2-01-status-by-count.png)
+```spl
+index=webapp | stats count by status
+```
+
+![HTTP status code distribution — near-uniform 200 before attacks begin](../screenshots/phase2/phase2-01-status-by-count.png)
 
 ---
 
 ## HTTP Method Breakdown
 
-`index=webapp | stats count by method` — shows the split between GET requests (browsing, loading pages) and POST requests (login, basket operations). Normal ratio is heavily GET-dominant. An unusual volume of POST requests to a single endpoint is a signal worth investigating — which is exactly what credential stuffing produces.
+GET requests dominate normal traffic (page loads, product browsing, image fetches). POST requests represent user actions — login, basket operations, account creation. An unusual POST rate to a single endpoint against this baseline is a meaningful signal worth investigating.
 
-![Method breakdown](../screenshots/phase3/phase3-02-method-breakdown.png)
+```spl
+index=webapp | stats count by method
+```
+
+![GET vs POST method ratio — GET dominant in normal browsing traffic](../screenshots/phase3/phase3-02-method-breakdown.png)
 
 ---
 
-## User Agent Baseline — Critical for Attack Detection
+## User Agent Baseline — Most Valuable Pre-Attack Observation
 
-`index=webapp | top useragent` — at baseline, 100% of traffic comes from a single real browser: Chrome on Mac. This is the most important baseline screenshot in the lab. When attack tools run in Phase 4, their user agents (`curl/8.14.1`, or no user agent at all) appear against this completely uniform background — making them trivially detectable as non-human traffic.
+At baseline, 100% of traffic originates from a single browser (Chrome on Mac). This uniformity is the most important baseline in the lab. Attack tools — `curl`, `sqlmap`, `Hydra` — either send non-browser user agents or no user agent at all. Their requests stand out completely against this background, making tool-based attacks detectable even without analyzing the payload.
 
-![User agent baseline](../screenshots/phase3/phase3-03-useragent-baseline.png)
+```spl
+index=webapp | top useragent
+```
+
+![Single browser user agent at baseline — any deviation is anomalous](../screenshots/phase3/phase3-03-useragent-baseline.png)
 
 ---
 
 ## Login Activity Baseline
 
-`index=webapp uri="*login*" method=POST | stats count by status` — at baseline, there are 3 failed logins (401) and 1 successful login (200) from normal browsing. This is what legitimate user behavior looks like. The Phase 4 credential stuffing attack will produce hundreds of 401s from a single IP in under 2 minutes — an obvious departure from this baseline.
+Three failed logins (401) and one successful login (200) represent the entire pre-attack login history — all from a single IP (`10.0.0.31`, the analyst's own Mac during normal testing). This is the baseline against which credential stuffing from Kali becomes unambiguous: same endpoint, same status codes, but from a different IP and at a volume of hundreds of attempts per minute.
 
-![Login status breakdown](../screenshots/phase2/phase2-03-login-status-breakdown.png)
+```spl
+index=webapp uri="*login*" method=POST | stats count by status
+```
 
----
-
-## Failed Logins by IP — Foundation of Brute Force Detection
-
-`index=webapp uri="*login*" status=401 | stats count by clientip` — at baseline, only one IP (`10.0.0.31`, the analyst's Mac) shows failed logins, with a count of 3. This is the exact query that becomes the brute force detection in Phase 4. After Hydra runs from Kali, this same query shows `10.0.0.100` with 1,400+ attempts — the contrast with this baseline makes the detection threshold meaningful.
-
-![Failed login by IP](../screenshots/phase2/phase2-04-failed-login-by-ip.png)
+![Login status codes at baseline — 3 failures, 1 success from normal testing](../screenshots/phase2/phase2-03-login-status-breakdown.png)
 
 ---
 
-## Key SPL Commands Reference
+## Failed Logins by Source IP — Foundation of Brute Force Detection
 
-| Command | Used for |
+The pre-attack picture: one IP with 3 failed login attempts. After credential stuffing runs in Phase 4, the same query shows `10.0.0.100` (Kali) with over 1,400 attempts. The contrast between these two screenshots is what makes the detection threshold of >5 attempts per minute meaningful — it's not an arbitrary number, it's grounded in what the actual baseline looks like.
+
+```spl
+index=webapp uri="*login*" status=401 | stats count by clientip
+```
+
+![Failed logins by IP at baseline — single IP, low count, normal activity](../screenshots/phase2/phase2-04-failed-login-by-ip.png)
+
+---
+
+## SPL Commands Used Throughout This Lab
+
+| Command | Purpose in this lab |
 |---|---|
-| `stats count by X` | Count events grouped by a field |
-| `timechart count by X` | Plot counts over time (used in dashboard panels) |
-| `rex field=X "regex"` | Extract a new field using a regex pattern (used in IDOR detection) |
-| `top X` | Most common values of a field |
-| `transaction host maxspan=30m` | Group related events into one correlated incident (centerpiece of Phase 5) |
-| `bucket _time span=1m` | Group events into time windows (used in brute force threshold detection) |
-| `where match(X, "pattern")` | Filter events using regex (used in injection and traversal detection) |
+| `stats count by X` | Aggregate events — used in every detection query |
+| `timechart count by X` | Plot event volume over time — used in dashboard panels |
+| `rex field=X "regex"` | Extract a field from raw text — used in IDOR detection to pull basket ID from URI |
+| `bucket _time span=Nm` | Group events into time windows — used in brute force rate detection |
+| `where match(X, "pattern")` | Filter by regex — used in injection and traversal detection |
+| `transaction host maxspan=Nm` | Correlate related events into one incident — centerpiece of insider threat detection |
+| `top X` | Most frequent values — used for user agent and URI baselining |
 
 ---
 

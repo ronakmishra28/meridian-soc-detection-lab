@@ -1,6 +1,8 @@
 # Phase 1 — Architecture & Multi-Source Log Ingestion
 
-The lab runs Splunk Enterprise on a MacBook M4 Pro as the central SIEM. Three virtual machines connect to it via Universal Forwarder, each shipping a different log source into its own dedicated Splunk index. OWASP Juice Shop is deployed on the Ubuntu VM via Docker and fronted by Nginx — Nginx is what generates the web application logs ingested into Splunk, not Juice Shop itself.
+Splunk Enterprise is deployed on the host Mac as the central SIEM. Three endpoints connect via Universal Forwarder, each shipping a distinct log source into its own index. Keeping logs in separate indexes prevents cross-contamination between data types and reflects how enterprise SIEMs are typically organized — web application logs, Linux host logs, and Windows endpoint logs each have different retention policies, access controls, and query patterns in production.
+
+OWASP Juice Shop runs in Docker on the Ubuntu VM. Nginx sits in front of it as a reverse proxy — this is the architecturally important piece, because Nginx is what writes the access logs that Splunk ingests. Juice Shop itself produces no structured logs useful for detection.
 
 ---
 
@@ -11,75 +13,65 @@ MacBook M4 Pro — Splunk Enterprise 10.2 (indexer + search head)
 └── Parallels Desktop
     ├── WEB-PROD-01 · Ubuntu 22.04 (10.0.0.33)
     │     Docker → Juice Shop (port 3000, internal only)
-    │     Nginx reverse proxy (port 8080) → logs to /var/log/nginx/juiceshop-access.log
-    │     Universal Forwarder → webapp index (Nginx logs) + linux index (syslog/auth)
+    │     Nginx reverse proxy (port 8080) → /var/log/nginx/juiceshop-access.log
+    │     Universal Forwarder → webapp (Nginx) + linux (syslog/auth) indexes
     │
     ├── FIN-WKS-04 · Windows 11 (10.0.0.32)
     │     Security + System + Application + PowerShell/Operational logs
     │     Universal Forwarder → windows index
     │
     └── Kali Linux (10.0.0.100)
-          Attack machine only — no forwarder, never monitored
+          Attack machine — no forwarder installed
 ```
 
 ---
 
-## Splunk Running with Developer License
+## All 3 Endpoints Connected and Sending Data
 
-Splunk Enterprise is live at `localhost:8000` with a 10GB/day Developer License (valid until October 2026). The orange banner confirms the license is active.
+`index=* | stats count by host, index` confirms all three endpoints are actively forwarding. Each host maps to its correct index, and event counts confirm data is flowing — not just that the forwarders are installed, but that logs are actively being received and indexed.
 
-![Splunk home](../screenshots/phase1/phase1-01-splunk-home.png)
-
----
-
-## All 3 Indexes Receiving Data
-
-Running `index=* | stats count by host, index` confirms all three endpoints are actively forwarding logs. `webapp` receives Nginx access logs from WEB-PROD-01, `linux` receives syslog from the same machine, and `windows` receives Security Event Logs from FIN-WKS-04. This single query is the quickest proof that the full architecture is functional.
-
-![All indexes with event counts](../screenshots/phase1/phase1-02-all-indexes.png)
+![All indexes receiving data from all three hosts](../screenshots/phase1/phase1-02-all-indexes.png)
 
 ---
 
-## Juice Shop Running via Nginx
+## Juice Shop Accessible via Nginx
 
-Juice Shop loads in the browser at `http://10.0.0.33:8080` — confirming Nginx is correctly proxying requests to the Docker container on port 3000. Every user interaction from this point on generates a log line in `/var/log/nginx/juiceshop-access.log`, which Splunk then ingests into the `webapp` index.
+Juice Shop is reachable at `http://10.0.0.33:8080`, confirming the Nginx reverse proxy is correctly routing traffic to the Docker container. Every HTTP request made to this address generates a log entry in `access_combined` format — the standard Nginx log format from which Splunk auto-extracts `clientip`, `method`, `uri`, `status`, `bytes`, and `useragent` with no custom configuration.
 
-![Juice Shop running](../screenshots/phase1/phase1-03-juiceshop-running.png)
-
----
-
-## Webapp Index Receiving Nginx Logs
-
-The `webapp` index is populated with `sourcetype=access_combined` — the standard Nginx combined log format. Splunk auto-extracts key fields from this format (`clientip`, `method`, `uri`, `status`, `bytes`, `useragent`) with no custom configuration needed. The host field shows `ronak` (WEB-PROD-01's hostname), source path confirms `/var/log/nginx/juiceshop-access.log`.
-
-![Webapp logs in Splunk](../screenshots/phase1/phase1-04-webapp-logs.png)
+![Juice Shop loaded through Nginx on WEB-PROD-01](../screenshots/phase1/phase1-03-juiceshop-running.png)
 
 ---
 
-## Windows Security Logs Flowing
+## Webapp Index Receiving Nginx Access Logs
 
-The `windows` index is receiving Security Event Logs from FIN-WKS-04 (`RONAKMISHRA345C`). EventCode 4689 (process termination) appears here — confirming the forwarder is connected and all Windows Security events are flowing. This same index will capture Event IDs 4663, 4103, and 5156 in Phase 5.
+The `webapp` index contains events from `/var/log/nginx/juiceshop-access.log` with `sourcetype=access_combined`. The left-hand field panel shows Splunk has automatically extracted `clientip`, `method`, `uri`, `status`, and `bytes` — all the fields needed for OWASP attack detection without any custom field extraction.
 
-![Windows logs in Splunk](../screenshots/phase1/phase1-05-windows-logs.png)
+![webapp index receiving Nginx logs with auto-extracted fields](../screenshots/phase1/phase1-04-webapp-logs.png)
 
 ---
 
-## All 3 Forwarders Confirmed Active
+## Windows Security Event Logs Flowing
 
-The Splunk Monitoring Console (Forwarders: Deployment view) shows all three endpoints connected simultaneously — `kali-linux-2025-2` (Linux, aarch64), `ronak` (Linux, aarch64), and `RONAKMISHRA345C` (Windows, x64) — all with `status: active` and timestamps from the same session. This is the definitive proof that the full multi-endpoint architecture is working.
+The `windows` index is receiving Security Event Logs from FIN-WKS-04. The presence of events here confirms the forwarder is connected and all Windows Security channel events are being forwarded — including the Event IDs 4663, 4103, and 5156 that will detect the insider threat in Phase 5.
 
-![All forwarders active](../screenshots/phase1/phase1-07-all-forwarders-active.png)
+![Windows Security Event Logs in the windows index](../screenshots/phase1/phase1-05-windows-logs.png)
+
+---
+
+## All 3 Forwarders Simultaneously Active
+
+The Monitoring Console (Forwarders: Deployment) shows `kali-linux-2025-2` (Linux/aarch64), `ronak` (Linux/aarch64), and `RONAKMISHRA345C` (Windows/x64) all connected at the same time with `status: active`. This confirms the full architecture is operational as a unit — not just individual components working in isolation.
+
+![All 3 forwarders active simultaneously in Monitoring Console](../screenshots/phase1/phase1-07-all-forwarders-active.png)
 
 ---
 
 ## Config Files
 
-All Universal Forwarder configuration files are in [`configs/`](../configs/):
-
-- [`webprod01-inputs.conf`](../configs/webprod01-inputs.conf) — Ubuntu: monitors syslog, auth.log, and both Nginx log files
-- [`finwks04-inputs.conf`](../configs/finwks04-inputs.conf) — Windows: monitors Security, System, Application, and PowerShell/Operational channels
-- [`outputs.conf`](../configs/outputs.conf) — All forwarders point to `10.0.0.31:9997` (Mac Splunk)
-- [`nginx-juiceshop-reverse-proxy.conf`](../configs/nginx-juiceshop-reverse-proxy.conf) — Nginx proxy config that routes port 8080 → Docker port 3000
+- [`configs/webprod01-inputs.conf`](../configs/webprod01-inputs.conf) — Ubuntu UF monitors syslog, auth.log, and both Nginx log files
+- [`configs/finwks04-inputs.conf`](../configs/finwks04-inputs.conf) — Windows UF monitors Security, System, Application, and PowerShell/Operational channels
+- [`configs/outputs.conf`](../configs/outputs.conf) — All forwarders point to `10.0.0.31:9997`
+- [`configs/nginx-juiceshop-reverse-proxy.conf`](../configs/nginx-juiceshop-reverse-proxy.conf) — Nginx proxy routing port 8080 to Docker port 3000
 
 ---
 
