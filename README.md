@@ -1,194 +1,200 @@
 # Meridian SOC Detection Lab — Splunk Enterprise SIEM
 
-A Splunk-based security operations detection lab built around a fictional company, **Meridian Commerce Inc.** — a mid-size online retailer. This lab demonstrates end-to-end SOC analyst workflows: multi-source log ingestion, SPL-based detection engineering, OWASP Top 10 web application attack detection, insider threat investigation, scheduled alerting, and incident reporting.
+**Splunk Enterprise 10.2** | **SC-200 Certified** | **CompTIA Security+** | **ISC2 CC**
 
-This is the third lab in my detection engineering series, deliberately covering ground my prior labs do not:
-
-| Lab | Focus | Attack surface |
-|---|---|---|
-| [Wazuh Enterprise SIEM](https://github.com/ronakmishra28/wazuh-enterprise-siem-lab) | Endpoint detection, custom rules, MITRE mapping | Host/network layer |
-| [Microsoft Sentinel Enterprise SIEM](https://github.com/ronakmishra28/microsoft-sentinel-enterprise-siem-lab) | Cloud-native SIEM, KQL, NIST IR | Infrastructure kill chain |
-| **This lab** | **Application-layer detection, insider threat, SPL correlation** | **Web application + internal data exfiltration** |
+Built a full enterprise SOC detection pipeline in Splunk from scratch — three endpoints, six OWASP Top 10 detections, an insider threat kill chain, live scheduled alerts, and two formal incident reports. This lab covers ground my prior [Wazuh](https://github.com/ronakmishra28/wazuh-enterprise-siem-lab) and [Sentinel](https://github.com/ronakmishra28/microsoft-sentinel-enterprise-siem-lab) labs do not: **application-layer attack detection** and **insider threat investigation** — areas most entry-level candidates never demonstrate.
 
 ---
 
-## Lab Architecture
-
-```
-MacBook M4 Pro — Splunk Enterprise 10.2 (indexer + search head) — Meridian SOC
-└── Parallels Desktop
-    ├── WEB-PROD-01 (Ubuntu 22.04)
-    │     Nginx reverse proxy → OWASP Juice Shop (Docker, port 8080)
-    │     Meridian's customer-facing e-commerce platform
-    │     Universal Forwarder → webapp + linux indexes
-    │
-    ├── FIN-WKS-04 (Windows 11)
-    │     Finance department workstation
-    │     Access to C:\CustomerExports\ (customer payment data)
-    │     Universal Forwarder → windows index
-    │
-    └── Kali Linux
-          External threat actor (Phase 4) / exfiltration destination (Phase 5)
-```
-
-### Splunk Indexes
-
-| Index | Source | Purpose |
-|---|---|---|
-| `webapp` | WEB-PROD-01 Nginx access/error logs | OWASP attack detection |
-| `linux` | WEB-PROD-01 syslog + auth.log | General host visibility |
-| `windows` | FIN-WKS-04 Security + PowerShell Operational logs | Insider threat detection |
+![Meridian SOC Dashboard](screenshots/phase7/phase7-01-meridian-soc-dashboard.png)
 
 ---
 
-## Lab Phases
+## Architecture
 
-### Phase 1 — Architecture & Multi-Source Ingestion
-- Splunk Enterprise with 10GB Developer License
-- Universal Forwarder deployed on 3 endpoints
-- OWASP Juice Shop deployed via Docker, fronted by Nginx reverse proxy
-- 3 separate indexes with distinct log sources
+```
+MacBook M4 Pro — Splunk Enterprise 10.2 (Central SIEM)
+└── Parallels
+    ├── WEB-PROD-01 · Ubuntu 22.04 · Nginx → OWASP Juice Shop (Docker)
+    ├── FIN-WKS-04  · Windows 11   · Finance workstation (insider threat target)
+    └── Kali Linux  · Attacker machine / exfiltration destination
+```
 
-### Phase 2+3 — SPL Fundamentals & Log Anatomy
-- Core SPL commands: `stats`, `eval`, `rex`, `timechart`, `top`, `transaction`
-- Nginx combined log format field extraction (`clientip`, `method`, `uri`, `status`, `bytes`, `useragent`)
-- Baseline traffic profiling before attack simulation
+| Index | Source | Logs |
+|---|---|---|
+| `webapp` | WEB-PROD-01 Nginx | Juice Shop access + error logs (`access_combined`) |
+| `linux` | WEB-PROD-01 | syslog + auth.log |
+| `windows` | FIN-WKS-04 | Security Events + PowerShell Operational |
 
-### Phase 4 — OWASP Top 10 Attack Detection (6 attacks)
+---
 
-| # | Attack | OWASP | MITRE | Result | Detected via Splunk |
-|---|---|---|---|---|---|
-| 1 | SQL Injection — Login Bypass | A03 Injection | T1190 | Admin account bypassed | Behavioral (volume pattern — POST body not logged by Nginx) |
-| 2 | Credential Stuffing | A07 Auth Failures | T1110.004 | Admin123 cracked in 3 attempts | Volume threshold by source IP |
-| 3 | DOM-Based XSS | A03 Injection | T1190 | JavaScript executed in browser | Fragment-based — invisible to server logs (documented blind spot) |
-| 4 | IDOR — Basket Enumeration | A01 Broken Access Control | T1190 | 3 other users' baskets accessed | Multiple distinct basket IDs from one IP |
-| 5 | Path Traversal | A05 Security Misconfiguration | T1190 | Blocked by two-layer defense | Encoded traversal pattern in URI |
-| 6 | Price Tampering | A04 Insecure Design | T1565.001 | Server-side price calc prevented exploit | Negative finding — secure design documented |
+## What Was Built
 
-### Phase 5 — Insider Threat & Data Exfiltration (Centerpiece)
+| | |
+|---|---|
+| Endpoints monitored | 3 (Ubuntu, Windows 11, Kali) |
+| Splunk indexes | 3 (webapp, linux, windows) |
+| OWASP attacks simulated | 6 |
+| Insider threat stages | 3 (file access → compression → exfiltration) |
+| SPL detection queries | 8 |
+| Scheduled alerts | 3 (High / Critical) |
+| Dashboard panels | 6 |
+| Incident reports | 2 (IR-MER-2026-001, IR-MER-2026-002) |
 
-A legitimate Finance account on FIN-WKS-04 stages and exfiltrates customer payment data:
+---
 
-**Stage 1 — File Access** → Event ID 4663 (File System auditing, SACL on CustomerExports)
-**Stage 2 — Compression** → Event ID 4103 (PowerShell Module Logging — `Compress-Archive` detected)
-**Stage 3 — Exfiltration** → Event ID 5156 (Filtering Platform Connection — curl.exe to Kali:4444)
+## Phase 4 — OWASP Top 10 Attack Detection
 
-**Centerpiece correlation query** — all 3 stages into one incident:
+All attacks executed from Kali against WEB-PROD-01 (10.0.0.33:8080).
+
+| Attack | OWASP | MITRE | Result | Detected |
+|---|---|---|---|---|
+| SQL Injection — Login Bypass | A03 | T1190 | Admin JWT token returned | Behavioral — POST body not logged by Nginx (documented gap) |
+| Credential Stuffing | A07 | T1110.004 | Admin cracked in 3/8 attempts | >5 POSTs/IP/min threshold |
+| DOM-Based XSS | A03 | T1190 | JS executed in browser | Fragment-based — server-side blind spot (documented) |
+| IDOR — Basket Enumeration | A01 | T1190 | 3 other users' baskets accessed | Multiple basket IDs from single IP |
+| Path Traversal | A05 | T1190 | Blocked at two layers | Encoded traversal pattern in URI |
+| Price Tampering | A04 | T1565.001 | Not exploitable | Server-side price calculation — secure design confirmed |
+
+![SQLi admin bypass](screenshots/phase4/phase4-02-sqli-admin-bypass-success.png)
+
+![IDOR detection in Splunk](screenshots/phase4/phase4-13-idor-detected-splunk.png)
+
+---
+
+## Phase 5 — Insider Threat & Data Exfiltration
+
+Finance account on FIN-WKS-04 accesses, compresses, and exfiltrates `C:\CustomerExports\payments_export.csv` to an external host.
+
+| Stage | Action | MITRE | Event ID |
+|---|---|---|---|
+| 1 | Read customer payment CSV | T1005 | 4663 (File System auditing) |
+| 2 | `Compress-Archive` to Desktop | T1560.001 | 4103 (PowerShell Module Logging) |
+| 3 | `curl.exe` POST to Kali:4444 | T1048 | 5156 (Filtering Platform Connection) |
+
+All three stages correlated into one incident using `transaction`:
+
 ```spl
-index=windows (EventCode=4663 Object_Name="*CustomerExports*") OR (EventCode=4103 _raw="*CompressFilesHelper*") OR (EventCode=5156 Destination_Port=4444)
+index=windows (EventCode=4663 Object_Name="*CustomerExports*")
+    OR (EventCode=4103 _raw="*CompressFilesHelper*")
+    OR (EventCode=5156 Destination_Port=4444)
 | transaction host maxspan=30m
 | where eventcount >= 3
 | table _time, host, eventcount, duration
 ```
-Result: 27 raw events correlated into 1 incident transaction spanning ~25 minutes.
+> 27 raw events → 1 correlated incident · ~25 minute transaction window
 
-**Key technical finding:** Native PowerShell cmdlets (`Compress-Archive`) do **not** trigger Event ID 4688 (Process Creation) — they execute within the existing PowerShell engine. Detection required explicitly enabling PowerShell Module Logging (Event ID 4103) via registry policy, which is disabled by default.
+![Insider threat correlation](screenshots/phase5/phase5-10-transaction-correlation.png)
 
-### Phase 6 — Detection Engineering & Alerts
-
-Three scheduled correlation searches deployed as live Splunk alerts:
-
-| Alert | Severity | Schedule | Trigger |
-|---|---|---|---|
-| Meridian - Brute Force Login Detected | High | Every 5 min | >5 login attempts per IP per minute |
-| Meridian - Web Application Injection Attempt Detected | High | Every 5 min | Injection syntax in URI |
-| Meridian - Insider Threat Data Exfiltration Chain | Critical | Every 10 min | 3-stage correlated transaction |
-
-### Phase 7 — Dashboard & Incident Reports
-
-**Meridian SOC Dashboard** (6 panels):
-- Webapp status code distribution over time
-- Top source IPs against login endpoint
-- Injection attempts over time
-- Login success vs failure rate
-- CustomerExports file access by account
-- Meridian alert activity (live alert firing log)
-
-**Incident Reports:**
-- [IR-MER-2026-001](incident-reports/IR-MER-2026-001-external-webapp-attack.md) — External Web Application Attack
-- [IR-MER-2026-002](incident-reports/IR-MER-2026-002-insider-data-exfiltration.md) — Insider Threat Data Exfiltration
+![Exfiltration network event](screenshots/phase5/phase5-08-event5156-network-detected.png)
 
 ---
 
-## Key Technical Findings
+## Phase 6 — Alerts
 
-These are the genuinely non-obvious findings from this lab — not things you'd get from a tutorial:
+| Alert | Severity | Schedule |
+|---|---|---|
+| Meridian - Brute Force Login Detected | High | `*/5 * * * *` |
+| Meridian - Web Application Injection Attempt Detected | High | `*/5 * * * *` |
+| Meridian - Insider Threat Data Exfiltration Chain | Critical | `*/10 * * * *` |
 
-**1. Nginx access logs don't capture POST body content.**
-SQL injection delivered via JSON POST body is completely invisible to standard web server logging. Detection requires a WAF with payload inspection or application-level request logging. This is a real detection gap in most default web infrastructure setups.
-
-**2. DOM-based XSS is invisible to server-side logs.**
-Payloads delivered via URL fragment (`#/search?q=<payload>`) are never sent to the server — browsers strip fragments before making HTTP requests. No amount of server-side logging catches this. Requires CSP headers or client-side monitoring.
-
-**3. Native PowerShell cmdlets bypass Event ID 4688.**
-`Compress-Archive`, `Invoke-WebRequest`, and other built-in cmdlets run inside the PowerShell engine — they don't spawn new processes. Any detection strategy relying solely on process creation auditing will miss these entirely. PowerShell Module Logging (4103) via registry policy is required.
-
-**4. Three separate audit subcategories must be explicitly enabled for insider threat detection.**
-File System (4663), PowerShell Module Logging (4103), and Filtering Platform Connection (5156) are all disabled by default on Windows 11. A fresh workstation gives you almost zero insider-threat telemetry without explicit configuration — this is a realistic gap at most organizations.
-
-**5. The `transaction` command turns multi-stage incidents into single detections.**
-Individual event-based detection of each stage (file access, compression, exfil) produces noise. Correlating them with `transaction` by host within a time window produces one alert per incident, dramatically reducing false positive volume and analyst fatigue.
+![Alerts firing](screenshots/phase6/phase6-01-bruteforce-alert-saved.png)
 
 ---
 
-## Repository Structure
+## Key Findings
+
+**1. Nginx doesn't log POST bodies.**
+SQL injection via JSON body is invisible to standard web server logs. Requires WAF payload inspection or app-level logging.
+
+**2. DOM XSS via URL fragment never reaches the server.**
+Fragment-based payloads (`#/search?q=<payload>`) are stripped by the browser before the HTTP request is made — completely undetectable server-side.
+
+**3. `Compress-Archive` doesn't trigger Event ID 4688.**
+Native PowerShell cmdlets run inside the PowerShell engine — no new process, no process creation event. Requires PowerShell Module Logging (Event ID 4103) via registry policy.
+
+**4. Three audit subcategories are disabled by default on Windows 11.**
+File System (4663), PowerShell Module Logging (4103), and Filtering Platform Connection (5156) must all be explicitly enabled. A default workstation gives almost zero insider-threat telemetry.
+
+**5. `transaction` turns a 27-event noise stream into one alert.**
+Correlating file access + compression + exfiltration by host within a 30-minute window = one actionable incident instead of three separate noisy detections.
+
+---
+
+## MITRE ATT&CK Coverage
+
+| Tactic | Technique | Detection |
+|---|---|---|
+| Initial Access | T1190 — Exploit Public-Facing Application | URI pattern matching, volume threshold |
+| Credential Access | T1110.004 — Credential Stuffing | Login POST count per IP per minute |
+| Collection | T1005 — Data from Local System | Event ID 4663 |
+| Collection | T1560.001 — Archive Collected Data | Event ID 4103 |
+| Exfiltration | T1048 — Exfiltration Over Alternative Protocol | Event ID 5156 |
+| Impact | T1565.001 — Stored Data Manipulation | Negative finding — server-side validation |
+
+---
+
+## Incident Reports
+
+| Report | Severity | Summary |
+|---|---|---|
+| [IR-MER-2026-001](incident-reports/IR-MER-2026-001-external-webapp-attack.md) | High | External web application attack — SQLi, credential stuffing, XSS |
+| [IR-MER-2026-002](incident-reports/IR-MER-2026-002-insider-data-exfiltration.md) | Critical | Insider threat — customer payment data exfiltrated via curl to external host |
+
+---
+
+## Detection Queries
+
+Full detection logic in [`detections/`](detections/). Key queries:
+
+**Credential stuffing:**
+```spl
+index=webapp uri="*login*" method=POST
+| bucket _time span=1m
+| stats count by clientip, _time
+| where count > 5
+```
+
+**IDOR enumeration:**
+```spl
+index=webapp uri="*/rest/basket/*"
+| rex field=uri "basket/(?<basket_id>\d+)"
+| stats dc(basket_id) as unique_baskets by clientip
+| where unique_baskets > 1
+```
+
+**Insider threat correlation:**
+```spl
+index=windows (EventCode=4663 Object_Name="*CustomerExports*")
+    OR (EventCode=4103 _raw="*CompressFilesHelper*")
+    OR (EventCode=5156 Destination_Port=4444)
+| transaction host maxspan=30m
+| where eventcount >= 3
+```
+
+---
+
+## Repo Structure
 
 ```
 meridian-soc-detection-lab/
-├── README.md
-├── configs/
-│   ├── webprod01-inputs.conf      ← Ubuntu UF config
-│   ├── finwks04-inputs.conf       ← Windows UF config
-│   ├── outputs.conf               ← Forwarder → Splunk routing
-│   └── nginx-juiceshop-reverse-proxy.conf
-├── detections/
-│   ├── phase4-sqli-login-bypass.md
-│   ├── phase4-credential-stuffing.md
-│   ├── phase4-xss-injection.md
-│   ├── phase4-idor-basket.md
-│   ├── phase4-path-traversal.md
-│   └── phase5-insider-exfiltration.md
-├── incident-reports/
-│   ├── IR-MER-2026-001-external-webapp-attack.md
-│   └── IR-MER-2026-002-insider-data-exfiltration.md
+├── configs/          ← Universal Forwarder inputs.conf + outputs.conf + Nginx config
+├── detections/       ← 6 detection files with SPL, MITRE mapping, tuning notes
+├── incident-reports/ ← IR-MER-2026-001 + IR-MER-2026-002
 └── screenshots/
-    ├── phase1/    ← Architecture & ingestion
-    ├── phase2/    ← SPL fundamentals
-    ├── phase3/    ← Log anatomy & baselining
-    ├── phase4/    ← OWASP attack detection
-    ├── phase5/    ← Insider threat kill chain
-    ├── phase6/    ← Alert configuration
-    └── phase7/    ← Dashboard
+    ├── phase1/       ← Architecture + log ingestion proof
+    ├── phase2-3/     ← SPL queries + log anatomy
+    ├── phase4/       ← 6 attacks — command + Splunk detection per attack
+    ├── phase5/       ← Insider threat kill chain
+    ├── phase6/       ← Alert configuration
+    └── phase7/       ← SOC dashboard
 ```
 
 ---
 
-## Tools & Technologies
+## Author
 
-| Tool | Role |
-|---|---|
-| Splunk Enterprise 10.2 | Central SIEM — indexing, search, alerting, dashboards |
-| Splunk Universal Forwarder 10.2.3 | Log shipping agent on all endpoints |
-| OWASP Juice Shop | Target web application (intentionally vulnerable e-commerce app) |
-| Docker | Juice Shop container runtime |
-| Nginx 1.18 | Reverse proxy in front of Juice Shop — generates access_combined logs |
-| Kali Linux | Attacker machine — Hydra, curl, custom bash scripts |
-| Windows 11 | Insider threat endpoint — PowerShell, Windows Event auditing |
-| Ubuntu 22.04 | Web server and Linux endpoint |
-| Parallels Desktop | VM hypervisor on M4 Pro Mac |
+**Ronak Mishra**
+[ronakmishra28.github.io](https://ronakmishra28.github.io) · [ronakonweb.medium.com](https://ronakonweb.medium.com) · [LinkedIn](https://www.linkedin.com/in/ronakmishra)
 
----
-
-## Certifications & Context
-
-Built as part of my SOC Analyst career development alongside:
-- SC-200: Microsoft Security Operations Analyst (passed May 2026)
-- CompTIA Security+
-- ISC2 CC
-
-**Blog:** [ronakonweb.medium.com](https://ronakonweb.medium.com)
-**Portfolio:** [ronakmishra28.github.io](https://ronakmishra28.github.io)
-
----
-
-*Meridian Commerce Inc. is a fictional company created for this lab. All data used is synthetic.*
+*Meridian Commerce Inc. is a fictional company. All data is synthetic.*
